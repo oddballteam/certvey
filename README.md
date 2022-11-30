@@ -101,9 +101,16 @@ docker build --tag certvey . && docker run \
 
 ### Questions
 - when can the acm be expected to auto-renew ([Confluence](https://confluence.cms.gov/display/WNMGWDSDEV/Application+and+Storage+Info+-+WDS+Certs) said 45-90 days before expiration)
+  - this is standard acm behavior. This usually is set to about a month or two.
+  - PACE cert is configurable
 - what is the best way to see if a cert is currently in use .Certificate.Status == 'ISSUED'?
+  - this would be good for ACM
+  - for others, could check elb if it has a reference to the IAM arn cert
+  - This would be useful to get all ELBs which are currently using the cert.
 - why does a cert chain have multiple expiration dates and what should be tracked for thes cert chains?
-- The info on "_CHAIN" certs is very limited. But there are matching (root?) certs with more info. Should this (root) info be also given for the chain. This 
+- The info on "_CHAIN" certs is very limited. But there are matching (root?) certs with more info. Should this (root) info be also given for the chain?
+  -  they should be handled different
+  - these might not be used, we can skip over chains
 
 ### Junk Notes
 aws elbv2 describe-load-balancers --names "marketplace-prod-coverage-nlb" | jq '.LoadBalancers[].DNSName'

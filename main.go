@@ -39,6 +39,12 @@ var (
 	cfg                      aws.Config
 )
 
+type inUse struct {
+	certArn  string
+	name string
+	dns string
+}
+
 func typeof(v interface{}) string {
 	return fmt.Sprintf("%T", v)
 }
@@ -61,7 +67,7 @@ func prettyLogging(c *cli.Context) {
 	var showLine bool = false
 	// TODO: change this
 	// var logLevel zerolog.Level = zerolog.ErrorLevel
-	var logLevel zerolog.Level = zerolog.InfoLevel
+	var logLevel zerolog.Level = zerolog.TraceLevel
 
 
 	if c.Bool("v") {
@@ -151,12 +157,12 @@ func main() {
 			if err := iamSearch(); err != nil {
 				log.Fatal().Err(err).Msg("")
 			}
-			if err := acmSearch(); err != nil {
-				log.Fatal().Err(err).Msg("")
-			}
-			if err := ssmSearch(); err != nil {
-				log.Fatal().Err(err).Msg("")
-			}
+			// if err := acmSearch(); err != nil {
+			// 	log.Fatal().Err(err).Msg("")
+			// }
+			// if err := ssmSearch(); err != nil {
+			// 	log.Fatal().Err(err).Msg("")
+			// }
 			return nil
 		},
 	}
@@ -176,12 +182,67 @@ func iamSearch() error {
 	if len(iamCerts.ServerCertificateMetadataList) < 1 {
 		log.Info().Msg("Could not find any server certificates")
 	}
+
+	
+	var arns []string
 	for _, metadata := range iamCerts.ServerCertificateMetadataList {
+		arns = append(arns, *metadata.Arn)
+	}
+
+	inUseLB := inUseBy(arns)
+	
+	// add LB info
+	for _, metadata := range iamCerts.ServerCertificateMetadataList {
+
+		// TODO: this repeats output. Should only do once
+		for _, lb := range inUseLB {
+			if lb.certArn == *metadata.Arn {
+				log.Info().Str("LB", lb.name).
+					Str("DNS", lb.dns).
+					Time("Expires", *metadata.Expiration).
+					Time("Issued", *metadata.UploadDate).
+					Msg(*metadata.ServerCertificateName)
+			}
+		}
+
 		log.Info().Time("Expires", *metadata.Expiration).
 			Time("Issued", *metadata.UploadDate).
 			Msg(*metadata.ServerCertificateName)
 	}
+
 	return nil
+}
+
+func inUseBy(arns []string) []inUse {
+	clientELB := elasticloadbalancing.NewFromConfig(cfg)
+	describeResult, err := clientELB.DescribeLoadBalancers(
+		context.TODO(),
+		&elasticloadbalancing.DescribeLoadBalancersInput{}, // PageSize 400 default
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("")
+	}
+	var lbs []inUse 
+	// var certARNs []string
+	for _, lb := range describeResult.LoadBalancerDescriptions {
+		if len(lb.ListenerDescriptions) > 0 {
+			if lb.ListenerDescriptions[0].Listener.SSLCertificateId != nil {
+				
+				log.Trace().Str("Arn", *lb.ListenerDescriptions[0].Listener.SSLCertificateId).
+					Msg("load balancer found with a cert")
+
+				// certARNs = append(certARNs, *lb.ListenerDescriptions[0].Listener.SSLCertificateId)
+
+				for _, arnInput := range arns {
+					if *lb.ListenerDescriptions[0].Listener.SSLCertificateId == arnInput {
+						log.Trace().Msg("Found matching ARNs")
+						lbs = append(lbs, inUse{certArn: arnInput, dns: *lb.DNSName, name: *lb.LoadBalancerName})
+					}
+				}
+			}
+		}
+	}
+	return lbs
 }
 
 func acmSearch() error {
@@ -273,7 +334,7 @@ func account() string {
 }
 
 func ssmSearch() error {	
-	fmt.Println("\n\n============= SSM =============")
+	log.Info().Msg("\n============= SSM =============")
 	
 	var certs []string
 	var resp *ssm.DescribeParametersOutput
