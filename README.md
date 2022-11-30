@@ -7,6 +7,29 @@
 - /urr/shared/ACM_PACE_NGINX_CERT_CHAIN	
 - /app2/shared/ACM_PACE_NGINX_CERT	
 
+### Implemented
+help
+-h
+--help
+
+-p
+--profile
+
+-v
+--version
+--verbose
+
+### as
+-d
+--debug
+--log
+
+--output
+--options
+--config
+
+-q
+--quiet
 
 # DOCKER CMD
 docker build --tag certvey . && docker run \
@@ -46,10 +69,11 @@ docker build --tag certvey . && docker run \
 - CNAME or  DomainValidationOptions[0].ResourceRecord.Name (this doesn't seem that important but could be printed with the use of an extra flag)
 - ELB DNSName (bonus data)
 
-### Questions 
+### Questions
 - when can the acm be expected to auto-renew ([Confluence](https://confluence.cms.gov/display/WNMGWDSDEV/Application+and+Storage+Info+-+WDS+Certs) said 45-90 days before expiration)
 - what is the best way to see if a cert is currently in use .Certificate.Status == 'ISSUED'?
-
+- why does a cert chain have multiple expiration dates and what should be tracked for thes cert chains?
+- The info on "_CHAIN" certs is very limited. But there are matching (root?) certs with more info. Should this (root) info be also given for the chain. This 
 
 ### Junk Notes
 aws elbv2 describe-load-balancers --names "marketplace-prod-coverage-nlb" | jq '.LoadBalancers[].DNSName'
@@ -239,4 +263,33 @@ openssl x509 -text -noout
 
 # Final conditional
 > = "CERT" != base64 != idp != session != saml_sp_cert != KEY
+
+
+
+# Always return something useful for SSM
+> all valid certs in ezapp ssm
+
+"/app2/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/app3/shared/ACM_PACE_NGINX_CERT",
+"/app3/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/mymedicare-sls/shared/ACM_PACE_NGINX_CERT",
+"/shared/INTERNAL_CERT_CHAIN",
+"/sls/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/slsgw/shared/ACM_PACE_NGINX_CERT",
+"/urr/shared/ACM_PACE_NGINX_CERT",
+"/mymedicare-sls/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/shared/INTERNAL_CERT"
+"/sls/shared/ACM_PACE_NGINX_CERT",
+"/slsgw/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/urr/shared/ACM_PACE_NGINX_CERT_CHAIN",
+"/app2/shared/ACM_PACE_NGINX_CERT"
+
+> each chain has a connected cert with info on it
+/app2/shared/ACM_PACE_NGINX_CERT_CHAIN (1) [14]
+/app3/shared/ACM_PACE_NGINX_CERT_CHAIN (3) [2]
+/mymedicare-sls/shared/ACM_PACE_NGINX_CERT_CHAIN (9) [4]
+/shared/INTERNAL_CERT_CHAIN (5) [10]
+/sls/shared/ACM_PACE_NGINX_CERT_CHAIN (6) [11]
+/slsgw/shared/ACM_PACE_NGINX_CERT_CHAIN (12) [7]
+/urr/shared/ACM_PACE_NGINX_CERT_CHAIN (13) [8]
 

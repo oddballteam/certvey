@@ -7,33 +7,36 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"os"
-	"log"
-	// "time"
+	"time"
 	// "encoding/json"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
+	acmType "github.com/aws/aws-sdk-go-v2/service/acm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	ssmType "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 
 	// CLI
 	"github.com/urfave/cli/v2"
+
+	// Logging
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 var ASCII_ART string = `  ___  ____  ____  ____  _  _  ____  _  _ 
  / __)(  __)(  _ \(_  _)/ )( \(  __)( \/ )
 ( (__  ) _)  )   /  )(  \ \/ / ) _)  )  / 
- \___)(____)(__\_) (__)  \__/ (____)(__/  
-`
+ \___)(____)(__\_) (__)  \__/ (____)(__/`
 
 var (
 	version, region, profile string
-	awsSession               aws.Config
+	verbosePrints            bool
+	cfg                      aws.Config
 )
 
 func typeof(v interface{}) string {
@@ -47,76 +50,144 @@ func chunkArr[T any](items []T, chunkSize int) (chunks [][]T) {
 	return append(chunks, items)
 }
 
-func setup() error {
+func prettyLogging(c *cli.Context) {
+	// Fatal FTL 4 log.Fatal().Err(err).Msg("")
+	// Error ERR 3 log.Error().Err(err).Msg("")
+	// Warn WRN 2
+	// Info INF 1
+	// Debug DBG 0 log.Print("hi")
+	var exclude []string
+	var showTime bool = false
+	var showLine bool = false
+	// TODO: change this
+	// var logLevel zerolog.Level = zerolog.ErrorLevel
+	var logLevel zerolog.Level = zerolog.InfoLevel
+
+
+	if c.Bool("v") {
+		logLevel = zerolog.InfoLevel
+	} else if c.Bool("vv") {
+		logLevel = zerolog.DebugLevel
+	} else if c.Bool("vvv") {
+		logLevel = zerolog.TraceLevel
+	}
+	if !showTime {
+		exclude = append(exclude, zerolog.TimestampFieldName) 
+	}
+	log.Logger = log.Output(zerolog.ConsoleWriter{
+		Out: os.Stderr,
+		PartsExclude: exclude,
+		FormatCaller: func(i interface{}) string {
+			line := strings.Split(fmt.Sprintf("%s", i), ":")
+			if showLine {
+				return "@" + line[len(line) - 1]
+			}
+			return ""
+		},
+	}).Level(logLevel).With().Caller().Logger()
+}
+
+func setup(c *cli.Context) error {
 	var err error
-	fmt.Println(ASCII_ART)
-	awsSession, err = config.LoadDefaultConfig(context.TODO(),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN"))),
-		config.WithRegion("us-east-1"),
-	)
+	// TODO: remove true
+	if c.Bool("v") || c.Bool("vv") || c.Bool("vvv") || true {
+		fmt.Println(ASCII_ART)
+		prettyLogging(c)
+	}
+	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
 	if err != nil {
-		panic(err)
+		log.Fatal().Err(err).Msg("")
 	}
 	return nil
 }
 
 func main() {
+	// Using the Python method of capital V for version
+	// and lowercase v for verbose logging
+	cli.VersionFlag = &cli.BoolFlag{
+		Name:    "version",
+		Aliases: []string{"V"},
+		Usage:   "print certvey version",
+	}
 	app := &cli.App{
 		Name:    "certvey",
 		Usage:   "AWS Certificate survey",
 		Version: "v0.1.0",
-		Before:  func(c *cli.Context) error { return setup() },
+		Compiled: time.Now(),
+		Authors: []*cli.Author{
+			&cli.Author{
+				Name:  "Example Human",
+				Email: "human@example.com",
+			},
+		},
+		Before:  func(c *cli.Context) error { return setup(c) },
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "profile",
-				Value:       "default",
+				Value:       "pet",
 				Usage:       "AWS profile to use",
 				EnvVars:     []string{"AWS_PROFILE"},
+				Aliases:     []string{"p"},
 				Destination: &profile,
 			},
+			&cli.BoolFlag{
+				Name:    "verbose",
+				Aliases: []string{"v"},
+				Usage:   "Verbose mode",
+				Value:   false,
+			},
+			&cli.BoolFlag{
+				Name:    "vv",
+				Usage:   "Very verbose mode",
+				Value:   false,
+			},
+			&cli.BoolFlag{
+				Name:    "vvv",
+				Usage:   "Very very verbose mode",
+				Value:   false,
+			},
 		},
-		Action: func(*cli.Context) error {
-			var err error
-			if err = iamSearch(); err != nil {
-				return err
+		Action: func(c *cli.Context) error {
+			if err := iamSearch(); err != nil {
+				log.Fatal().Err(err).Msg("")
 			}
-			if err = acmSearch(); err != nil {
-				return err
+			if err := acmSearch(); err != nil {
+				log.Fatal().Err(err).Msg("")
 			}
-			if err = ssmSearch(); err != nil {
-				return err
+			if err := ssmSearch(); err != nil {
+				log.Fatal().Err(err).Msg("")
 			}
 			return nil
 		},
 	}
-	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+	err := app.Run(os.Args); if err != nil {
+		log.Fatal().Err(err).Msg("")
 	}
 }
 
 func iamSearch() error {
-	fmt.Println("\n\n============= IAM =============")
-	clientIAM := iam.NewFromConfig(awsSession)
+	log.Info().Msg("\n============= IAM =============")
+	// fmt.Println("\n\n============= IAM =============")
+	clientIAM := iam.NewFromConfig(cfg)
 	iamCerts, err := clientIAM.ListServerCertificates(context.TODO(), &iam.ListServerCertificatesInput{})
 	if err != nil {
 		return err
 	}
 	if len(iamCerts.ServerCertificateMetadataList) < 1 {
-		fmt.Println("Could not find any server certificates")
+		log.Info().Msg("Could not find any server certificates")
 	}
 	for _, metadata := range iamCerts.ServerCertificateMetadataList {
-		fmt.Println("Expiration:           " + (*metadata.Expiration).Format("2006-01-02 15:04:05 Monday"))
-		fmt.Println("ServerCertificateName " + *metadata.ServerCertificateName)
-		fmt.Println("UploadDate:           " + (*metadata.UploadDate).Format("2006-01-02 15:04:05 Monday"))
-		fmt.Println("")
+		log.Info().Time("Expires", *metadata.Expiration).
+			Time("Issued", *metadata.UploadDate).
+			Msg(*metadata.ServerCertificateName)
 	}
 	return nil
 }
 
 func acmSearch() error {
-	fmt.Println("\n============= ACM + ELB =============")
-	clientACM := acm.NewFromConfig(awsSession)
-	clientELB := elasticloadbalancing.NewFromConfig(awsSession)
+	log.Info().Msg("\n============= ACM + ELB =============")
+	clientACM := acm.NewFromConfig(cfg)
+	clientELB := elasticloadbalancing.NewFromConfig(cfg)
 	result, err := clientACM.ListCertificates(context.TODO(), &acm.ListCertificatesInput{})
 	if err != nil {
 		return err
@@ -131,26 +202,41 @@ func acmSearch() error {
 		}
 		result, err := clientACM.DescribeCertificate(context.TODO(), input)
 		if err != nil {
-			fmt.Println(err)
+			return err
 		}
-		fmt.Println(*result.Certificate.DomainName)
-		// fmt.Println("NotAfter", *result.Certificate.NotAfter)
-		// fmt.Println("IssuedAt", *result.Certificate.IssuedAt)
+		log.Print(*result.Certificate.DomainName)
 
 		// ELB GET DNS NAME
 		var elb []string
+		type cert struct {
+			acm  string
+			name []string
+			dns []string
+			expires time.Time
+			issued time.Time
+			status acmType.CertificateStatus // PENDING_VALIDATION | FAILED | VALIDATION_TIMED_OUT | ISSUED
+			renewalEligibility acmType.RenewalEligibility // ELIGIBLE | INELIGIBLE
+			validationStatus acmType.DomainStatus // PENDING_VALIDATION | SUCCESS | FAILED
+		}
+		temp := cert {acm: *result.Certificate.DomainName} 
 		for _, value := range result.Certificate.InUseBy {
 
 			if strings.Contains(value, "/app/") || strings.Contains(value, "/net/") {
-				fmt.Println(" ❌ skipping due to being a v2 elb", value)
+				log.Warn().Str(" ❌ skipping due to being a v2 elb", value).Send()
 			} else {
 				split := strings.Split(value, "/")
-				fmt.Println("        " + split[len(split) - 1], "| expires: ", result.Certificate.NotAfter.String())
+				log.Print("        " + split[len(split) - 1], "| expires: ", result.Certificate.NotAfter.String())
 				elb = append(elb, split[len(split) - 1])
+				temp.expires = *result.Certificate.NotAfter
+				temp.issued = *result.Certificate.IssuedAt
 			}
 		}
-		fmt.Println("     Relevant ELB DNS Names:")
-		// fmt.Println("DEBUG:", elb)
+
+		temp.name = elb
+		temp.status = result.Certificate.Status
+		temp.renewalEligibility = result.Certificate.RenewalEligibility
+		temp.validationStatus = result.Certificate.DomainValidationOptions[0].ValidationStatus
+
 		describeResult, err := clientELB.DescribeLoadBalancers(
 			context.TODO(),
 			&elasticloadbalancing.DescribeLoadBalancersInput{
@@ -160,15 +246,28 @@ func acmSearch() error {
 		if err != nil {
 			return err
 		}
+
+		var dns []string
 		for _, value := range describeResult.LoadBalancerDescriptions {
-			fmt.Println("        - ELB: " + *value.DNSName)
+			log.Print("        - ELB: " + *value.DNSName)
+			dns = append(dns, *value.DNSName)
 		}
+		temp.dns = dns
+
+		log.Info().Strs("LB", temp.name).
+			Str("validationStatus", fmt.Sprintf("%v", temp.validationStatus)).
+			Str("renewalEligibility", fmt.Sprintf("%v", temp.renewalEligibility)).
+			Str("status", fmt.Sprintf("%v", temp.status)).
+			Strs("DNS", temp.dns).
+			Time("Expires", temp.expires).
+			Time("Issued", temp.issued).
+			Msg(temp.acm)
 	}
 	return nil
 }
 
 func account() string {
-	clientSTS := sts.NewFromConfig(awsSession)
+	clientSTS := sts.NewFromConfig(cfg)
 	id, _ := clientSTS.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
 	return *id.Account
 }
@@ -182,8 +281,8 @@ func ssmSearch() error {
 	var nextToken string = "first run" 
 	var pageSize int32 = 50
 	
-	clientSSM := ssm.NewFromConfig(awsSession)
-	filter := []types.ParameterStringFilter{{
+	clientSSM := ssm.NewFromConfig(cfg)
+	filter := []ssmType.ParameterStringFilter{{
 		Key:    aws.String("Name"),
 		Option: aws.String("Contains"),
 		Values: []string{"cert"},
@@ -206,10 +305,10 @@ func ssmSearch() error {
 			return err
 		}
 		if len(resp.Parameters) == 0 {
-			fmt.Println("There are 0 results in this request, breaking loop")
+			log.Info().Msg("There are 0 results in this request, breaking loop")
 			break
 		} else {
-			fmt.Println("Request returned", len(resp.Parameters), "parameters, applying additional filters now...")
+			log.Info().Msg(fmt.Sprintf("DescribeParameters found %v parameters, applying additional filters now...", len(resp.Parameters)))
 			for _, value := range resp.Parameters {
 				if strings.Contains(*value.Name, "BASE64") || 
 				   strings.Contains(*value.Name, "idp") ||
@@ -253,12 +352,12 @@ func ssmSearch() error {
 		certs = append(certs, "/app2/shared/ACM_PACE_NGINX_CERT")
 	}
 
-	fmt.Println(len(certs), "are valid certs")
-	
+	log.Info().Msg(fmt.Sprintf("found %d valid certs", len(certs)))
 	
 	if len(certs) > 0 {
 		chunkedCerts := chunkArr(certs, 10)
 		for _, nextCerts := range chunkedCerts {
+			log.Info().Strs("certs", nextCerts).Send()
 			out, err := clientSSM.GetParameters(context.TODO(), &ssm.GetParametersInput{
 				Names: nextCerts,
 				WithDecryption: aws.Bool(true),
@@ -266,7 +365,22 @@ func ssmSearch() error {
 			if err != nil {
 				return err
 			}
+			// var lastName string = ""
 			for _, value := range out.Parameters {
+
+
+				// check if this is another cert chain
+				// /app2/shared/ACM_PACE_NGINX_CERT_CHAIN
+				// log.Print(*value.Name)
+				// log.Print("last name ", lastName)
+				// if *value.Name == lastName {
+				// 	log.Print("repeat name", *value.Name, " contain chain = ", strings.Contains(*value.Name, "CHAIN"))
+				// }
+				// if strings.Contains(*value.Name, "CHAIN") && *value.Name == lastName {
+				// 	log.Print("duplicate!!!")
+				// }
+				// lastName = *value.Name
+
 				certPEMBlock := []byte(*value.Value)
 				var certDERBlock *pem.Block
 				for {
@@ -279,7 +393,36 @@ func ssmSearch() error {
 						if err != nil {
 							return err
 						}
-						fmt.Println(*value.Name, certi.DNSNames, certi.NotAfter)
+						// var cn string
+						if strings.Contains(certi.Subject.String(), ".") {
+							// Splits will return original string if not present
+							splitComma := strings.Split(certi.Subject.String(), ",")
+							split := strings.Split(splitComma[0], "=")
+
+							// log.Warn().Str("subject ", split[len(split) - 1]).Send()
+							// cn = split[len(split) - 1]
+
+							log.Info().Str("CN", split[len(split) - 1]).
+								Time("Expires", certi.NotAfter).
+								Time("NotBefore", certi.NotBefore).
+								Msg(fmt.Sprintf("%s", *value.Name))
+						} else if len(certi.PermittedDNSDomains) > 0 {
+							// log.Print("PermittedDNSDomains ", certi.PermittedDNSDomains)
+
+							log.Info().Strs("PermittedDNSDomains", certi.PermittedDNSDomains).
+								Time("Expires", certi.NotAfter).
+								Time("NotBefore", certi.NotBefore).
+								Msg(fmt.Sprintf("%s", *value.Name))
+						} else {
+							if len(certi.DNSNames) > 0 {
+								log.Info().Strs("DNSNames", certi.DNSNames).
+									Time("Expires", certi.NotAfter).
+									Time("NotBefore", certi.NotBefore).
+									Msg(fmt.Sprintf("%s", *value.Name))
+							} else {
+								log.Error().Str("Could not find anything useful for", *value.Name).Send()
+							}
+						}
 					}
 				}
 			}
