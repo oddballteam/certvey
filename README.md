@@ -7,6 +7,36 @@
 - /urr/shared/ACM_PACE_NGINX_CERT_CHAIN	
 - /app2/shared/ACM_PACE_NGINX_CERT	
 
+# Content
+- [EZAPP Bug](#ezapp-bug)
+    + [Implemented](#implemented)
+    + [as](#as)
+- [DOCKER CMD](#docker-cmd)
+- [📝 Dev Notes](#---dev-notes)
+  * [CLI](#cli)
+    + [Verify](#verify)
+    + [Relevant Data](#relevant-data)
+    + [Questions](#questions)
+    + [Junk Notes](#junk-notes)
+- [Exhaustive SSM parameter search for certs](#exhaustive-ssm-parameter-search-for-certs)
+  * [PET](#pet)
+    + [CERTS](#certs)
+    + [Potential conditional](#potential-conditional)
+  * [EZAPP](#ezapp)
+    + [Valid certs](#valid-certs)
+    + [Potential conditional](#potential-conditional-1)
+    + [IAM](#iam)
+  * [FLH](#flh)
+    + [Potential conditional](#potential-conditional-2)
+    + [Valid SSM certs](#valid-ssm-certs)
+    + [IAM](#iam-1)
+  * [ECWS](#ecws)
+    + [Potential conditional](#potential-conditional-3)
+    + [Valid SSM certs](#valid-ssm-certs-1)
+    + [IAM](#iam-2)
+- [Final conditional](#final-conditional)
+- [Always return something useful for SSM](#always-return-something-useful-for-ssm)
+
 ### Implemented
 help
 -h
