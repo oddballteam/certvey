@@ -8,7 +8,7 @@ import (
 	"encoding/pem"
 	"os"
 	"time"
-	// "encoding/json"
+	"encoding/json"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -65,49 +65,63 @@ func chunkArr[T any](items []T, chunkSize int) (chunks [][]T) {
 	return append(chunks, items)
 }
 
-func prettyLogging(c *cli.Context) {
-	var exclude []string
-	var showTime bool = false
-	var showLine bool = false
-	// TODO: change this
-	// var logLevel zerolog.Level = zerolog.ErrorLevel
-	// var logLevel zerolog.Level = zerolog.TraceLevel
-	var logLevel zerolog.Level = zerolog.InfoLevel
+func check(err error) {
+	if err != nil {
+		log.Fatal().Err(err).Msg("")
+	}
+}
 
-	if c.Bool("v") {
+func buildLogger(c *cli.Context) {
+	// 4 FTL log.Fatal().Err(err).Msg("")
+	// 3 ERR log.Error().Err(err).Msg("")
+	// 2 WRN log.Warn().Msg("")
+	// 1 INF log.Info().Msg("")
+	// 0 DBG log.Print("")
+	// - TRC log.Trace().Msg("")
+	var logLevel zerolog.Level = zerolog.WarnLevel
+
+	if c.Bool("verbose") {
 		logLevel = zerolog.InfoLevel
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	} else if c.Bool("vv") {
-		logLevel = zerolog.DebugLevel
-	} else if c.Bool("vvv") {
 		logLevel = zerolog.TraceLevel
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	}
-	if !showTime {
-		exclude = append(exclude, zerolog.TimestampFieldName) 
+	if c.Bool("quiet") {
+		logLevel = zerolog.FatalLevel
+		zerolog.SetGlobalLevel(zerolog.FatalLevel)
 	}
-	log.Logger = log.Output(zerolog.ConsoleWriter{
-		Out: os.Stderr,
-		PartsExclude: exclude,
-		FormatCaller: func(i interface{}) string {
-			line := strings.Split(fmt.Sprintf("%s", i), ":")
-			if showLine {
-				return "@" + line[len(line) - 1]
-			}
-			return ""
-		},
-	}).Level(logLevel).With().Caller().Logger()
+	if c.Bool("debug") {
+		var exclude []string
+		var showTime bool = false
+		var showLine bool = false
+		if !showTime {
+			exclude = append(exclude, zerolog.TimestampFieldName) 
+		}
+		log.Logger = log.Output(zerolog.ConsoleWriter{
+			Out: os.Stderr,
+			PartsExclude: exclude,
+			FormatCaller: func(i interface{}) string {
+				line := strings.Split(fmt.Sprintf("%s", i), ":")
+				if showLine {
+					return "@" + line[len(line) - 1]
+				}
+				return ""
+			},
+		}).Level(logLevel).With().Caller().Logger()
+	}
+	if !c.Bool("quiet") {
+		fmt.Println(ASCII_ART)
+	}
+
+	zerolog.SetGlobalLevel(logLevel)
 }
 
 func setup(c *cli.Context) error {
 	var err error
-	// TODO: remove true
-	if c.Bool("v") || c.Bool("vv") || c.Bool("vvv") || true {
-		fmt.Println(ASCII_ART)
-		prettyLogging(c)
-	}
+	buildLogger(c)
 	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
+	check(err)
 	return nil
 }
 
@@ -152,33 +166,57 @@ func main() {
 				Value:   false,
 			},
 			&cli.BoolFlag{
-				Name:    "vvv",
-				Usage:   "Very very verbose mode",
+				Name:    "quiet",
+				Aliases: []string{"q"},
+				Usage:   "Quiet mode",
 				Value:   false,
+			},
+			&cli.BoolFlag{
+				Name:    "debug",
+				Aliases: []string{"d"},
+				Usage:   "Debug mode",
+				Value:   false,
+			},
+			&cli.StringFlag{
+				Name:    "file",
+				Aliases: []string{"f"},
+				Usage:   "file directory and name to output cert data to",
+				Required: true,
 			},
 		},
 		Action: func(c *cli.Context) error {
+			var certs []cert
 			iamCerts := iamSearch()
 			log.Info().Interface("certs", iamCerts).Int("num", len(iamCerts)).Send()
 			acmCerts := acmSearch()
 			log.Info().Interface("certs", acmCerts).Int("num", len(acmCerts)).Send()
 			ssmCerts := ssmSearch()
 			log.Info().Interface("certs", ssmCerts).Int("num", len(ssmCerts)).Send()
+
+			certs = append(certs, iamCerts...)
+			certs = append(certs, acmCerts...)
+			certs = append(certs, ssmCerts...)
+			log.Info().Interface("certs", certs).Send()
+
+			// write to a file
+			file, err := os.OpenFile(c.String("file"), os.O_CREATE, os.ModePerm) 
+			check(err)
+			defer file.Close()  
+			encoder := json.NewEncoder(file) 
+			encoder.Encode(certs)
+
 			return nil
 		},
 	}
-	err := app.Run(os.Args); if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
+	err := app.Run(os.Args)
+	check(err)
 }
 
 func iamSearch() []cert {
 	log.Info().Msg("\n============= IAM =============")
 	clientIAM := iam.NewFromConfig(cfg)
 	iamCerts, err := clientIAM.ListServerCertificates(context.TODO(), &iam.ListServerCertificatesInput{})
-	if err != nil {
-		log.Panic().Err(err).Msg("")
-	}
+	check(err)
 	if len(iamCerts.ServerCertificateMetadataList) < 1 {
 		log.Info().Msg("Could not find any server certificates")
 	}
@@ -238,9 +276,7 @@ func inUseBy(arns []string) []cert {
 		context.TODO(),
 		&elasticloadbalancing.DescribeLoadBalancersInput{}, // PageSize 400 default
 	)
-	if err != nil {
-		log.Fatal().Err(err).Msg("")
-	}
+	check(err)
 	var lbs []cert 
 	for _, lb := range describeResult.LoadBalancerDescriptions {
 		if len(lb.ListenerDescriptions) > 0 {
@@ -266,9 +302,7 @@ func acmSearch() []cert {
 	clientACM := acm.NewFromConfig(cfg)
 	clientELB := elasticloadbalancing.NewFromConfig(cfg)
 	result, err := clientACM.ListCertificates(context.TODO(), &acm.ListCertificatesInput{})
-	if err != nil {
-		log.Panic().Err(err).Msg("")
-	}
+	check(err)
 	var certificatesArn []*string
 	for _, r := range result.CertificateSummaryList {
 		certificatesArn = append(certificatesArn, r.CertificateArn)
@@ -280,10 +314,8 @@ func acmSearch() []cert {
 			CertificateArn: c,
 		}
 		result, err := clientACM.DescribeCertificate(context.TODO(), input)
-		if err != nil {
-			log.Panic().Err(err).Msg("")
-		}
-		log.Print(*result.Certificate.DomainName)
+		check(err)
+		log.Trace().Msg(*result.Certificate.DomainName)
 
 		// ELB GET DNS NAME
 		var lbs []string
@@ -294,7 +326,7 @@ func acmSearch() []cert {
 				log.Warn().Str(" ❌ skipping due to being a v2 elb", value).Send()
 			} else {
 				split := strings.Split(value, "/")
-				log.Print("        " + split[len(split) - 1], "| expires: ", result.Certificate.NotAfter.String())
+				log.Trace().Msg(fmt.Sprintf("        %v | expires: %v", result.Certificate.NotAfter.String(), split[len(split) - 1]))
 				lbs = append(lbs, split[len(split) - 1])
 				cert.Expires = *result.Certificate.NotAfter
 				cert.Issued = *result.Certificate.IssuedAt
@@ -312,13 +344,10 @@ func acmSearch() []cert {
 				LoadBalancerNames: lbs,
 			},
 		)
-		if err != nil {
-			log.Panic().Err(err).Msg("")
-		}
-
+		check(err)
 		var dns []string
 		for _, value := range describeResult.LoadBalancerDescriptions {
-			log.Print("        - ELB: " + *value.DNSName)
+			log.Trace().Msg(fmt.Sprintf("        - ELB: %v", *value.DNSName))
 			dns = append(dns, *value.DNSName)
 		}
 		cert.DNS = dns
@@ -373,9 +402,7 @@ func ssmSearch() []cert {
 				NextToken: aws.String(nextToken),
 			})
 		}
-		if err != nil {
-			log.Fatal().Err(err).Msg("")
-		}
+		check(err)
 		if len(resp.Parameters) == 0 {
 			log.Trace().Msg("There are 0 results in this request, breaking loop")
 			break
@@ -432,9 +459,7 @@ func ssmSearch() []cert {
 				Names: tenSecrets,
 				WithDecryption: aws.Bool(true),
 			})
-			if err != nil {
-				log.Fatal().Err(err).Msg("")
-			}
+			check(err)
 			
 			for _, value := range out.Parameters {
 				cert := cert{Name: *value.Name}
@@ -447,9 +472,7 @@ func ssmSearch() []cert {
 					}
 					if certDERBlock.Type == "CERTIFICATE" {
 						certi, err := x509.ParseCertificate(certDERBlock.Bytes)
-						if err != nil {
-							log.Fatal().Err(err).Msg("")
-						}
+						check(err)
 
 						if !cert.Expires.IsZero() {
 							// Additional Cert chain block, set the closer expiration
