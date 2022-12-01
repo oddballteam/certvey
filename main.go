@@ -39,11 +39,20 @@ var (
 	cfg                      aws.Config
 )
 
-type inUse struct {
-	certArn  string
-	name string
-	dns string
+type cert struct {
+	Name  string
+	LB []string
+	DNS []string
+	CertArn string
+	Expires time.Time
+	Issued time.Time
+	NotBefore time.Time
+	UploadDate time.Time
+	Status acmType.CertificateStatus // PENDING_VALIDATION | FAILED | VALIDATION_TIMED_OUT | ISSUED
+	RenewalEligibility acmType.RenewalEligibility // ELIGIBLE | INELIGIBLE
+	ValidationStatus acmType.DomainStatus // PENDING_VALIDATION | SUCCESS | FAILED
 }
+
 
 func typeof(v interface{}) string {
 	return fmt.Sprintf("%T", v)
@@ -57,18 +66,13 @@ func chunkArr[T any](items []T, chunkSize int) (chunks [][]T) {
 }
 
 func prettyLogging(c *cli.Context) {
-	// Fatal FTL 4 log.Fatal().Err(err).Msg("")
-	// Error ERR 3 log.Error().Err(err).Msg("")
-	// Warn WRN 2
-	// Info INF 1
-	// Debug DBG 0 log.Print("hi")
 	var exclude []string
 	var showTime bool = false
 	var showLine bool = false
 	// TODO: change this
 	// var logLevel zerolog.Level = zerolog.ErrorLevel
-	var logLevel zerolog.Level = zerolog.TraceLevel
-
+	// var logLevel zerolog.Level = zerolog.TraceLevel
+	var logLevel zerolog.Level = zerolog.InfoLevel
 
 	if c.Bool("v") {
 		logLevel = zerolog.InfoLevel
@@ -154,15 +158,12 @@ func main() {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if err := iamSearch(); err != nil {
-				log.Fatal().Err(err).Msg("")
-			}
-			// if err := acmSearch(); err != nil {
-			// 	log.Fatal().Err(err).Msg("")
-			// }
-			// if err := ssmSearch(); err != nil {
-			// 	log.Fatal().Err(err).Msg("")
-			// }
+			iamCerts := iamSearch()
+			log.Info().Interface("certs", iamCerts).Int("num", len(iamCerts)).Send()
+			acmCerts := acmSearch()
+			log.Info().Interface("certs", acmCerts).Int("num", len(acmCerts)).Send()
+			ssmCerts := ssmSearch()
+			log.Info().Interface("certs", ssmCerts).Int("num", len(ssmCerts)).Send()
 			return nil
 		},
 	}
@@ -171,18 +172,16 @@ func main() {
 	}
 }
 
-func iamSearch() error {
+func iamSearch() []cert {
 	log.Info().Msg("\n============= IAM =============")
-	// fmt.Println("\n\n============= IAM =============")
 	clientIAM := iam.NewFromConfig(cfg)
 	iamCerts, err := clientIAM.ListServerCertificates(context.TODO(), &iam.ListServerCertificatesInput{})
 	if err != nil {
-		return err
+		log.Panic().Err(err).Msg("")
 	}
 	if len(iamCerts.ServerCertificateMetadataList) < 1 {
 		log.Info().Msg("Could not find any server certificates")
 	}
-
 	
 	var arns []string
 	for _, metadata := range iamCerts.ServerCertificateMetadataList {
@@ -192,28 +191,48 @@ func iamSearch() error {
 	inUseLB := inUseBy(arns)
 	
 	// add LB info
-	for _, metadata := range iamCerts.ServerCertificateMetadataList {
-
-		// TODO: this repeats output. Should only do once
+	var certs []cert
+	for _, c := range iamCerts.ServerCertificateMetadataList {
+		tempCert := cert{}
 		for _, lb := range inUseLB {
-			if lb.certArn == *metadata.Arn {
-				log.Info().Str("LB", lb.name).
-					Str("DNS", lb.dns).
-					Time("Expires", *metadata.Expiration).
-					Time("Issued", *metadata.UploadDate).
-					Msg(*metadata.ServerCertificateName)
+			if lb.CertArn == *c.Arn {
+				tempCert = cert{
+					LB: []string{lb.Name},
+					DNS: lb.DNS,
+				}
+				
 			}
 		}
-
-		log.Info().Time("Expires", *metadata.Expiration).
-			Time("Issued", *metadata.UploadDate).
-			Msg(*metadata.ServerCertificateName)
+		
+		if tempCert.DNS != nil {
+			log.Info().Strs("LB", tempCert.LB).
+				Strs("DNS", tempCert.DNS).
+				Time("Expires", *c.Expiration).
+				Time("Issued", *c.UploadDate).
+				Msg(*c.ServerCertificateName)
+			cert := cert{
+				LB: tempCert.LB,
+				DNS: tempCert.DNS,
+				Expires: *c.Expiration,
+				UploadDate: *c.UploadDate,
+				Name: *c.ServerCertificateName,
+			}
+			certs = append(certs, cert)
+		} else {
+			log.Info().Time("Expires", *c.Expiration).
+				Time("Issued", *c.UploadDate).
+				Msg(*c.ServerCertificateName)
+			certs = append(certs, cert{
+				Expires: *c.Expiration,
+				UploadDate: *c.UploadDate,
+				Name: *c.ServerCertificateName,
+			})
+		}
 	}
-
-	return nil
+	return certs
 }
 
-func inUseBy(arns []string) []inUse {
+func inUseBy(arns []string) []cert {
 	clientELB := elasticloadbalancing.NewFromConfig(cfg)
 	describeResult, err := clientELB.DescribeLoadBalancers(
 		context.TODO(),
@@ -222,8 +241,7 @@ func inUseBy(arns []string) []inUse {
 	if err != nil {
 		log.Fatal().Err(err).Msg("")
 	}
-	var lbs []inUse 
-	// var certARNs []string
+	var lbs []cert 
 	for _, lb := range describeResult.LoadBalancerDescriptions {
 		if len(lb.ListenerDescriptions) > 0 {
 			if lb.ListenerDescriptions[0].Listener.SSLCertificateId != nil {
@@ -231,12 +249,10 @@ func inUseBy(arns []string) []inUse {
 				log.Trace().Str("Arn", *lb.ListenerDescriptions[0].Listener.SSLCertificateId).
 					Msg("load balancer found with a cert")
 
-				// certARNs = append(certARNs, *lb.ListenerDescriptions[0].Listener.SSLCertificateId)
-
 				for _, arnInput := range arns {
 					if *lb.ListenerDescriptions[0].Listener.SSLCertificateId == arnInput {
 						log.Trace().Msg("Found matching ARNs")
-						lbs = append(lbs, inUse{certArn: arnInput, dns: *lb.DNSName, name: *lb.LoadBalancerName})
+						lbs = append(lbs, cert{CertArn: arnInput, DNS: []string{*lb.DNSName}, Name: *lb.LoadBalancerName})
 					}
 				}
 			}
@@ -245,41 +261,33 @@ func inUseBy(arns []string) []inUse {
 	return lbs
 }
 
-func acmSearch() error {
+func acmSearch() []cert {
 	log.Info().Msg("\n============= ACM + ELB =============")
 	clientACM := acm.NewFromConfig(cfg)
 	clientELB := elasticloadbalancing.NewFromConfig(cfg)
 	result, err := clientACM.ListCertificates(context.TODO(), &acm.ListCertificatesInput{})
 	if err != nil {
-		return err
+		log.Panic().Err(err).Msg("")
 	}
 	var certificatesArn []*string
 	for _, r := range result.CertificateSummaryList {
 		certificatesArn = append(certificatesArn, r.CertificateArn)
 	}
+
+	var certs []cert
 	for _, c := range certificatesArn {
 		input := &acm.DescribeCertificateInput{
 			CertificateArn: c,
 		}
 		result, err := clientACM.DescribeCertificate(context.TODO(), input)
 		if err != nil {
-			return err
+			log.Panic().Err(err).Msg("")
 		}
 		log.Print(*result.Certificate.DomainName)
 
 		// ELB GET DNS NAME
-		var elb []string
-		type cert struct {
-			acm  string
-			name []string
-			dns []string
-			expires time.Time
-			issued time.Time
-			status acmType.CertificateStatus // PENDING_VALIDATION | FAILED | VALIDATION_TIMED_OUT | ISSUED
-			renewalEligibility acmType.RenewalEligibility // ELIGIBLE | INELIGIBLE
-			validationStatus acmType.DomainStatus // PENDING_VALIDATION | SUCCESS | FAILED
-		}
-		temp := cert {acm: *result.Certificate.DomainName} 
+		var lbs []string
+		cert := cert{Name: *result.Certificate.DomainName} 
 		for _, value := range result.Certificate.InUseBy {
 
 			if strings.Contains(value, "/app/") || strings.Contains(value, "/net/") {
@@ -287,25 +295,25 @@ func acmSearch() error {
 			} else {
 				split := strings.Split(value, "/")
 				log.Print("        " + split[len(split) - 1], "| expires: ", result.Certificate.NotAfter.String())
-				elb = append(elb, split[len(split) - 1])
-				temp.expires = *result.Certificate.NotAfter
-				temp.issued = *result.Certificate.IssuedAt
+				lbs = append(lbs, split[len(split) - 1])
+				cert.Expires = *result.Certificate.NotAfter
+				cert.Issued = *result.Certificate.IssuedAt
 			}
 		}
 
-		temp.name = elb
-		temp.status = result.Certificate.Status
-		temp.renewalEligibility = result.Certificate.RenewalEligibility
-		temp.validationStatus = result.Certificate.DomainValidationOptions[0].ValidationStatus
+		cert.LB = lbs
+		cert.Status = result.Certificate.Status
+		cert.RenewalEligibility = result.Certificate.RenewalEligibility
+		cert.ValidationStatus = result.Certificate.DomainValidationOptions[0].ValidationStatus
 
 		describeResult, err := clientELB.DescribeLoadBalancers(
 			context.TODO(),
 			&elasticloadbalancing.DescribeLoadBalancersInput{
-				LoadBalancerNames: elb,
+				LoadBalancerNames: lbs,
 			},
 		)
 		if err != nil {
-			return err
+			log.Panic().Err(err).Msg("")
 		}
 
 		var dns []string
@@ -313,18 +321,20 @@ func acmSearch() error {
 			log.Print("        - ELB: " + *value.DNSName)
 			dns = append(dns, *value.DNSName)
 		}
-		temp.dns = dns
+		cert.DNS = dns
 
-		log.Info().Strs("LB", temp.name).
-			Str("validationStatus", fmt.Sprintf("%v", temp.validationStatus)).
-			Str("renewalEligibility", fmt.Sprintf("%v", temp.renewalEligibility)).
-			Str("status", fmt.Sprintf("%v", temp.status)).
-			Strs("DNS", temp.dns).
-			Time("Expires", temp.expires).
-			Time("Issued", temp.issued).
-			Msg(temp.acm)
+		log.Info().Strs("LB", cert.LB).
+			Str("validationStatus", fmt.Sprintf("%v", cert.ValidationStatus)).
+			Str("renewalEligibility", fmt.Sprintf("%v", cert.RenewalEligibility)).
+			Str("status", fmt.Sprintf("%v", cert.Status)).
+			Strs("DNS", cert.DNS).
+			Time("Expires", cert.Expires).
+			Time("Issued", cert.Issued).
+			Msg(cert.Name)
+
+		certs = append(certs, cert)
 	}
-	return nil
+	return certs
 }
 
 func account() string {
@@ -333,10 +343,11 @@ func account() string {
 	return *id.Account
 }
 
-func ssmSearch() error {	
+func ssmSearch() []cert {	
 	log.Info().Msg("\n============= SSM =============")
 	
-	var certs []string
+	var certs []cert
+	var secrets []string
 	var resp *ssm.DescribeParametersOutput
 	var err error
 	var nextToken string = "first run" 
@@ -363,13 +374,13 @@ func ssmSearch() error {
 			})
 		}
 		if err != nil {
-			return err
+			log.Fatal().Err(err).Msg("")
 		}
 		if len(resp.Parameters) == 0 {
-			log.Info().Msg("There are 0 results in this request, breaking loop")
+			log.Trace().Msg("There are 0 results in this request, breaking loop")
 			break
 		} else {
-			log.Info().Msg(fmt.Sprintf("DescribeParameters found %v parameters, applying additional filters now...", len(resp.Parameters)))
+			log.Trace().Msg(fmt.Sprintf("DescribeParameters found %v parameters, applying additional filters now...", len(resp.Parameters)))
 			for _, value := range resp.Parameters {
 				if strings.Contains(*value.Name, "BASE64") || 
 				   strings.Contains(*value.Name, "idp") ||
@@ -379,16 +390,14 @@ func ssmSearch() error {
 					 strings.Contains(*value.Name, "saml_sp_cert") ||
 					 strings.Contains(*value.Name, "_KEY") ||
 					 strings.Contains(*value.Name, "key") {
-					// fmt.Println(" ❌", *value.Name)
+					log.Trace().Str("❌", *value.Name).Msg("Filtered out Param")
 				} else {
-					// fmt.Println(" ✅", *value.Name)
-					certs = append(certs, *value.Name)
+					log.Trace().Str("✅", *value.Name).Msg("Adding Param")
+					secrets = append(secrets, *value.Name)
 				}
-
-
 			}
 			if nextToken == "first run" && len(resp.Parameters) < int(pageSize) {
-				// fmt.Println("First run and below max results size. Breaking loop")
+				log.Trace().Msg("First run and below max results size. Breaking loop")
 				break
 			}
 			nextToken = *resp.NextToken
@@ -405,43 +414,30 @@ func ssmSearch() error {
 	// /app2/shared/ACM_PACE_NGINX_CERT (if selected exactly)
 	awsAccount := account()
 	if awsAccount == "074424520335" {
-		certs = append(certs, "/mymedicare-sls/shared/ACM_PACE_NGINX_CERT_CHAIN")
-		certs = append(certs, "/shared/INTERNAL_CERT")
-		certs = append(certs, "/sls/shared/ACM_PACE_NGINX_CERT")
-		certs = append(certs, "/slsgw/shared/ACM_PACE_NGINX_CERT_CHAIN")
-		certs = append(certs, "/urr/shared/ACM_PACE_NGINX_CERT_CHAIN")
-		certs = append(certs, "/app2/shared/ACM_PACE_NGINX_CERT")
+		secrets = append(secrets, "/mymedicare-sls/shared/ACM_PACE_NGINX_CERT_CHAIN")
+		secrets = append(secrets, "/shared/INTERNAL_CERT")
+		secrets = append(secrets, "/sls/shared/ACM_PACE_NGINX_CERT")
+		secrets = append(secrets, "/slsgw/shared/ACM_PACE_NGINX_CERT_CHAIN")
+		secrets = append(secrets, "/urr/shared/ACM_PACE_NGINX_CERT_CHAIN")
+		secrets = append(secrets, "/app2/shared/ACM_PACE_NGINX_CERT")
 	}
 
-	log.Info().Msg(fmt.Sprintf("found %d valid certs", len(certs)))
+	log.Trace().Msg(fmt.Sprintf("found %d valid certs", len(secrets)))
 	
-	if len(certs) > 0 {
-		chunkedCerts := chunkArr(certs, 10)
-		for _, nextCerts := range chunkedCerts {
-			log.Info().Strs("certs", nextCerts).Send()
+	if len(secrets) > 0 {
+		chunkedSecrets := chunkArr(secrets, 10)
+		for _, tenSecrets := range chunkedSecrets {
+			log.Trace().Strs("certs", tenSecrets).Send()
 			out, err := clientSSM.GetParameters(context.TODO(), &ssm.GetParametersInput{
-				Names: nextCerts,
+				Names: tenSecrets,
 				WithDecryption: aws.Bool(true),
 			})
 			if err != nil {
-				return err
+				log.Fatal().Err(err).Msg("")
 			}
-			// var lastName string = ""
+			
 			for _, value := range out.Parameters {
-
-
-				// check if this is another cert chain
-				// /app2/shared/ACM_PACE_NGINX_CERT_CHAIN
-				// log.Print(*value.Name)
-				// log.Print("last name ", lastName)
-				// if *value.Name == lastName {
-				// 	log.Print("repeat name", *value.Name, " contain chain = ", strings.Contains(*value.Name, "CHAIN"))
-				// }
-				// if strings.Contains(*value.Name, "CHAIN") && *value.Name == lastName {
-				// 	log.Print("duplicate!!!")
-				// }
-				// lastName = *value.Name
-
+				cert := cert{Name: *value.Name}
 				certPEMBlock := []byte(*value.Value)
 				var certDERBlock *pem.Block
 				for {
@@ -452,42 +448,45 @@ func ssmSearch() error {
 					if certDERBlock.Type == "CERTIFICATE" {
 						certi, err := x509.ParseCertificate(certDERBlock.Bytes)
 						if err != nil {
-							return err
+							log.Fatal().Err(err).Msg("")
 						}
-						// var cn string
+
+						if !cert.Expires.IsZero() {
+							// Additional Cert chain block, set the closer expiration
+							if cert.Expires.After(certi.NotAfter) {
+								log.Trace().Msg(fmt.Sprintf("%v after %v setting closer expiration", cert.Expires, certi.NotAfter))
+								cert.Expires = certi.NotAfter
+							}
+						} else {
+							// Set expiration from first block
+							cert.Expires = certi.NotAfter
+							cert.NotBefore = certi.NotBefore
+						}
+
+						cert.Name = *value.Name
+
 						if strings.Contains(certi.Subject.String(), ".") {
-							// Splits will return original string if not present
 							splitComma := strings.Split(certi.Subject.String(), ",")
 							split := strings.Split(splitComma[0], "=")
+							cert.DNS = []string{split[len(split) - 1]}
+						}
 
-							// log.Warn().Str("subject ", split[len(split) - 1]).Send()
-							// cn = split[len(split) - 1]
+						if len(certi.PermittedDNSDomains) > 0 {
+							cert.DNS = certi.PermittedDNSDomains
+						}
 
-							log.Info().Str("CN", split[len(split) - 1]).
-								Time("Expires", certi.NotAfter).
-								Time("NotBefore", certi.NotBefore).
-								Msg(fmt.Sprintf("%s", *value.Name))
-						} else if len(certi.PermittedDNSDomains) > 0 {
-							// log.Print("PermittedDNSDomains ", certi.PermittedDNSDomains)
-
-							log.Info().Strs("PermittedDNSDomains", certi.PermittedDNSDomains).
-								Time("Expires", certi.NotAfter).
-								Time("NotBefore", certi.NotBefore).
-								Msg(fmt.Sprintf("%s", *value.Name))
-						} else {
-							if len(certi.DNSNames) > 0 {
-								log.Info().Strs("DNSNames", certi.DNSNames).
-									Time("Expires", certi.NotAfter).
-									Time("NotBefore", certi.NotBefore).
-									Msg(fmt.Sprintf("%s", *value.Name))
-							} else {
-								log.Error().Str("Could not find anything useful for", *value.Name).Send()
-							}
+						if len(certi.DNSNames) > 0 {
+							cert.DNS = certi.DNSNames
 						}
 					}
 				}
+				certs = append(certs, cert)
+				log.Info().Strs("DNS", cert.DNS).
+					Time("Expires", cert.Expires).
+					Time("NotBefore", cert.NotBefore).
+					Msg(cert.Name)
 			}
 		}
 	}
-	return nil
+	return certs
 }
