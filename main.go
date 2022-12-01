@@ -1,24 +1,24 @@
 package main
 
 import (
-	"fmt"
 	"context"
-	"strings"
 	"crypto/x509"
-	"encoding/pem"
-	"os"
-	"time"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"os"
+	"strings"
+	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
 	acmType "github.com/aws/aws-sdk-go-v2/service/acm/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmType "github.com/aws/aws-sdk-go-v2/service/ssm/types"
-	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	// CLI
 	"github.com/urfave/cli/v2"
@@ -40,19 +40,18 @@ var (
 )
 
 type cert struct {
-	Name  string
-	LB []string
-	DNS []string
-	CertArn string
-	Expires time.Time
-	Issued time.Time
-	NotBefore time.Time
-	UploadDate time.Time
-	Status acmType.CertificateStatus // PENDING_VALIDATION | FAILED | VALIDATION_TIMED_OUT | ISSUED
+	Name               string
+	LB                 []string
+	DNS                []string
+	CertArn            string
+	Expires            time.Time
+	Issued             time.Time
+	NotBefore          time.Time
+	UploadDate         time.Time
+	Status             acmType.CertificateStatus  // PENDING_VALIDATION | FAILED | VALIDATION_TIMED_OUT | ISSUED
 	RenewalEligibility acmType.RenewalEligibility // ELIGIBLE | INELIGIBLE
-	ValidationStatus acmType.DomainStatus // PENDING_VALIDATION | SUCCESS | FAILED
+	ValidationStatus   acmType.DomainStatus       // PENDING_VALIDATION | SUCCESS | FAILED
 }
-
 
 func typeof(v interface{}) string {
 	return fmt.Sprintf("%T", v)
@@ -96,15 +95,15 @@ func buildLogger(c *cli.Context) {
 		var showTime bool = false
 		var showLine bool = false
 		if !showTime {
-			exclude = append(exclude, zerolog.TimestampFieldName) 
+			exclude = append(exclude, zerolog.TimestampFieldName)
 		}
 		log.Logger = log.Output(zerolog.ConsoleWriter{
-			Out: os.Stderr,
+			Out:          os.Stderr,
 			PartsExclude: exclude,
 			FormatCaller: func(i interface{}) string {
 				line := strings.Split(fmt.Sprintf("%s", i), ":")
 				if showLine {
-					return "@" + line[len(line) - 1]
+					return "@" + line[len(line)-1]
 				}
 				return ""
 			},
@@ -134,9 +133,9 @@ func main() {
 		Usage:   "print certvey version",
 	}
 	app := &cli.App{
-		Name:    "certvey",
-		Usage:   "AWS Certificate survey",
-		Version: "v0.1.0",
+		Name:     "certvey",
+		Usage:    "AWS Certificate survey",
+		Version:  "v0.1.0",
 		Compiled: time.Now(),
 		Authors: []*cli.Author{
 			&cli.Author{
@@ -144,7 +143,7 @@ func main() {
 				Email: "human@example.com",
 			},
 		},
-		Before:  func(c *cli.Context) error { return setup(c) },
+		Before: func(c *cli.Context) error { return setup(c) },
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "profile",
@@ -161,9 +160,9 @@ func main() {
 				Value:   false,
 			},
 			&cli.BoolFlag{
-				Name:    "vv",
-				Usage:   "Very verbose mode",
-				Value:   false,
+				Name:  "vv",
+				Usage: "Very verbose mode",
+				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:    "quiet",
@@ -178,9 +177,9 @@ func main() {
 				Value:   false,
 			},
 			&cli.StringFlag{
-				Name:    "file",
-				Aliases: []string{"f"},
-				Usage:   "file directory and name to output cert data to",
+				Name:     "file",
+				Aliases:  []string{"f"},
+				Usage:    "file directory and name to output cert data to",
 				Required: true,
 			},
 		},
@@ -199,10 +198,10 @@ func main() {
 			log.Info().Interface("certs", certs).Send()
 
 			// write to a file
-			file, err := os.OpenFile(c.String("file"), os.O_CREATE, os.ModePerm) 
+			file, err := os.OpenFile(c.String("file"), os.O_CREATE, os.ModePerm)
 			check(err)
-			defer file.Close()  
-			encoder := json.NewEncoder(file) 
+			defer file.Close()
+			encoder := json.NewEncoder(file)
 			encoder.Encode(certs)
 
 			return nil
@@ -220,14 +219,14 @@ func iamSearch() []cert {
 	if len(iamCerts.ServerCertificateMetadataList) < 1 {
 		log.Info().Msg("Could not find any server certificates")
 	}
-	
+
 	var arns []string
 	for _, metadata := range iamCerts.ServerCertificateMetadataList {
 		arns = append(arns, *metadata.Arn)
 	}
 
 	inUseLB := inUseBy(arns)
-	
+
 	// add LB info
 	var certs []cert
 	for _, c := range iamCerts.ServerCertificateMetadataList {
@@ -235,13 +234,13 @@ func iamSearch() []cert {
 		for _, lb := range inUseLB {
 			if lb.CertArn == *c.Arn {
 				tempCert = cert{
-					LB: []string{lb.Name},
+					LB:  []string{lb.Name},
 					DNS: lb.DNS,
 				}
-				
+
 			}
 		}
-		
+
 		if tempCert.DNS != nil {
 			log.Info().Strs("LB", tempCert.LB).
 				Strs("DNS", tempCert.DNS).
@@ -249,11 +248,11 @@ func iamSearch() []cert {
 				Time("Issued", *c.UploadDate).
 				Msg(*c.ServerCertificateName)
 			cert := cert{
-				LB: tempCert.LB,
-				DNS: tempCert.DNS,
-				Expires: *c.Expiration,
+				LB:         tempCert.LB,
+				DNS:        tempCert.DNS,
+				Expires:    *c.Expiration,
 				UploadDate: *c.UploadDate,
-				Name: *c.ServerCertificateName,
+				Name:       *c.ServerCertificateName,
 			}
 			certs = append(certs, cert)
 		} else {
@@ -261,9 +260,9 @@ func iamSearch() []cert {
 				Time("Issued", *c.UploadDate).
 				Msg(*c.ServerCertificateName)
 			certs = append(certs, cert{
-				Expires: *c.Expiration,
+				Expires:    *c.Expiration,
 				UploadDate: *c.UploadDate,
-				Name: *c.ServerCertificateName,
+				Name:       *c.ServerCertificateName,
 			})
 		}
 	}
@@ -277,11 +276,11 @@ func inUseBy(arns []string) []cert {
 		&elasticloadbalancing.DescribeLoadBalancersInput{}, // PageSize 400 default
 	)
 	check(err)
-	var lbs []cert 
+	var lbs []cert
 	for _, lb := range describeResult.LoadBalancerDescriptions {
 		if len(lb.ListenerDescriptions) > 0 {
 			if lb.ListenerDescriptions[0].Listener.SSLCertificateId != nil {
-				
+
 				log.Trace().Str("Arn", *lb.ListenerDescriptions[0].Listener.SSLCertificateId).
 					Msg("load balancer found with a cert")
 
@@ -319,15 +318,15 @@ func acmSearch() []cert {
 
 		// ELB GET DNS NAME
 		var lbs []string
-		cert := cert{Name: *result.Certificate.DomainName} 
+		cert := cert{Name: *result.Certificate.DomainName}
 		for _, value := range result.Certificate.InUseBy {
 
 			if strings.Contains(value, "/app/") || strings.Contains(value, "/net/") {
 				log.Warn().Str(" ❌ skipping due to being a v2 elb", value).Send()
 			} else {
 				split := strings.Split(value, "/")
-				log.Trace().Msg(fmt.Sprintf("        %v | expires: %v", result.Certificate.NotAfter.String(), split[len(split) - 1]))
-				lbs = append(lbs, split[len(split) - 1])
+				log.Trace().Msg(fmt.Sprintf("        %v | expires: %v", result.Certificate.NotAfter.String(), split[len(split)-1]))
+				lbs = append(lbs, split[len(split)-1])
 				cert.Expires = *result.Certificate.NotAfter
 				cert.Issued = *result.Certificate.IssuedAt
 			}
@@ -372,16 +371,16 @@ func account() string {
 	return *id.Account
 }
 
-func ssmSearch() []cert {	
+func ssmSearch() []cert {
 	log.Info().Msg("\n============= SSM =============")
-	
+
 	var certs []cert
 	var secrets []string
 	var resp *ssm.DescribeParametersOutput
 	var err error
-	var nextToken string = "first run" 
+	var nextToken string = "first run"
 	var pageSize int32 = 50
-	
+
 	clientSSM := ssm.NewFromConfig(cfg)
 	filter := []ssmType.ParameterStringFilter{{
 		Key:    aws.String("Name"),
@@ -399,7 +398,7 @@ func ssmSearch() []cert {
 			resp, err = clientSSM.DescribeParameters(context.TODO(), &ssm.DescribeParametersInput{
 				MaxResults:       aws.Int32(pageSize),
 				ParameterFilters: filter,
-				NextToken: aws.String(nextToken),
+				NextToken:        aws.String(nextToken),
 			})
 		}
 		check(err)
@@ -409,14 +408,14 @@ func ssmSearch() []cert {
 		} else {
 			log.Trace().Msg(fmt.Sprintf("DescribeParameters found %v parameters, applying additional filters now...", len(resp.Parameters)))
 			for _, value := range resp.Parameters {
-				if strings.Contains(*value.Name, "BASE64") || 
-				   strings.Contains(*value.Name, "idp") ||
-				   strings.Contains(*value.Name, "_DIR") ||
-				   strings.Contains(*value.Name, "_PATH") ||
-					 strings.Contains(*value.Name, "session") ||
-					 strings.Contains(*value.Name, "saml_sp_cert") ||
-					 strings.Contains(*value.Name, "_KEY") ||
-					 strings.Contains(*value.Name, "key") {
+				if strings.Contains(*value.Name, "BASE64") ||
+					strings.Contains(*value.Name, "idp") ||
+					strings.Contains(*value.Name, "_DIR") ||
+					strings.Contains(*value.Name, "_PATH") ||
+					strings.Contains(*value.Name, "session") ||
+					strings.Contains(*value.Name, "saml_sp_cert") ||
+					strings.Contains(*value.Name, "_KEY") ||
+					strings.Contains(*value.Name, "key") {
 					log.Trace().Str("❌", *value.Name).Msg("Filtered out Param")
 				} else {
 					log.Trace().Str("✅", *value.Name).Msg("Adding Param")
@@ -430,7 +429,6 @@ func ssmSearch() []cert {
 			nextToken = *resp.NextToken
 		}
 	}
-
 
 	// EZAPP bug where these 6 parameters do not show in DescribeParameters
 	// /mymedicare-sls/shared/ACM_PACE_NGINX_CERT_CHAIN	(only if contains is removed)
@@ -450,17 +448,17 @@ func ssmSearch() []cert {
 	}
 
 	log.Trace().Msg(fmt.Sprintf("found %d valid certs", len(secrets)))
-	
+
 	if len(secrets) > 0 {
 		chunkedSecrets := chunkArr(secrets, 10)
 		for _, tenSecrets := range chunkedSecrets {
 			log.Trace().Strs("certs", tenSecrets).Send()
 			out, err := clientSSM.GetParameters(context.TODO(), &ssm.GetParametersInput{
-				Names: tenSecrets,
+				Names:          tenSecrets,
 				WithDecryption: aws.Bool(true),
 			})
 			check(err)
-			
+
 			for _, value := range out.Parameters {
 				cert := cert{Name: *value.Name}
 				certPEMBlock := []byte(*value.Value)
@@ -491,7 +489,7 @@ func ssmSearch() []cert {
 						if strings.Contains(certi.Subject.String(), ".") {
 							splitComma := strings.Split(certi.Subject.String(), ",")
 							split := strings.Split(splitComma[0], "=")
-							cert.DNS = []string{split[len(split) - 1]}
+							cert.DNS = []string{split[len(split)-1]}
 						}
 
 						if len(certi.PermittedDNSDomains) > 0 {
